@@ -23,7 +23,6 @@
 #define INTERVAL 60000        // interval between the readings (in milliseconds) //
 
 //--------------- Pins ---------------//
-const int led = 8;                        // led pin
 int tempPin = A3;                         // lm35 pin
 int pinSCT = A5;                          // Analog pint connected to SCT-013 sensor
 
@@ -55,14 +54,16 @@ const int interval_ntp = 86400;         // Number of seconds between re-syncs (8
 
 //--------------- SCT-013 Sensor Variables ---------------//
 EnergyMonitor SCT013;
-const int index_SCT = 8;        // mexer aqui
+
+//--------------- Sensor Index Variables ---------------//
+const int index_SCT = 9;
+const int sensor_index = 10;
 
 void setup() {
   Serial.begin(9600);
   analogReference(INTERNAL1V1);
   pinMode(tempPin, INPUT);
   Serial.begin(9600);
-  while (!Serial);                      // Wait for serial port to connect. Needed for native USB port only
 
   //--------------- Ethernet Inicialization ---------------//
   Ethernet.begin(mac, ip);
@@ -82,8 +83,7 @@ void setup() {
 void loop() {
   char temperature[TAM_S];
   char current[TAM_S];
-  int sensor_index = 9;     // arrumar aqui
-
+  
   reading = (voltage_reference * analogRead(tempPin) * 100.0) / 1024;     // Calculate the current temperature
   Serial.print("Temperature: ");
   Serial.println((float)reading);
@@ -112,7 +112,7 @@ void loop() {
   sendHttpRequest(sentence_temperature);
   sendHttpRequest(sentence_current);
   
-  delay(500);                          // wait for x milliseconds before taking the reading again
+  delay(INTERVAL);                          // wait for x milliseconds before taking the reading again
 }
 
 // function to connect on web service address //
