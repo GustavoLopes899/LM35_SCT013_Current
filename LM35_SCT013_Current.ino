@@ -18,9 +18,10 @@
 #include <HttpClient.h>
 #include <EmonLib.h>
 
-#define TAM_S 11              // tam small //
-#define TAM_L 85              // tam large //
-#define INTERVAL 60000        // interval between the readings (in milliseconds) //
+#define TAM_S 11                // tam small //
+#define TAM_L 85                // tam large //
+#define INTERVAL 100            // interval between the readings (in milliseconds) //
+#define CALIBRATION_TIMES 3     // number of readings to calibrate
 
 //--------------- Pins ---------------//
 int tempPin = A3;                         // lm35 pin
@@ -71,19 +72,26 @@ void setup() {
   //--------------- NTP Inicialization ---------------//
   Udp.begin(localPort);
   Serial.println("Waiting for sync in NTP server...");
-  while (year() < 2018) {
-    setSyncProvider(getNtpTime);
-    getActualDate();
-  }
+  //while (year() < 2018) {
+  setSyncProvider(getNtpTime);
+  getActualDate();
+  //}
 
   //--------------- Energy Monitor Inicialization ---------------//
-  SCT013.current(pinSCT, 1.70101);
+  //SCT013.current(pinSCT, 1.70101);
+  SCT013.current(pinSCT, 6.06060606061);
+
+  //--------------- Calibration ---------------//
+  for (int i = 0; i < CALIBRATION_TIMES; i++) {
+    reading = (voltage_reference * analogRead(tempPin) * 100.0) / 1024;     // Calibrate the temperature's reading
+    double irms = SCT013.calcIrms(1480);                                    // Calibrate the eletric current's reading
+  }
 }
 
 void loop() {
   char temperature[TAM_S];
   char current[TAM_S];
-  
+
   reading = (voltage_reference * analogRead(tempPin) * 100.0) / 1024;     // Calculate the current temperature
   Serial.print("Temperature: ");
   Serial.println((float)reading);
@@ -93,7 +101,7 @@ void loop() {
   Serial.print(irms);
   Serial.println(" A");
   Serial.println();
-  
+
   // get actual time (hour, minute, second) and check if has any change in day, format to save on database //
   checkChangeDay();
   getActualTime();
@@ -111,7 +119,7 @@ void loop() {
   // save on database with web service //
   sendHttpRequest(sentence_temperature);
   sendHttpRequest(sentence_current);
-  
+
   delay(INTERVAL);                          // wait for x milliseconds before taking the reading again
 }
 
