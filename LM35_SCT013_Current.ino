@@ -20,12 +20,13 @@
 
 #define TAM_S 11                // tam small //
 #define TAM_L 85                // tam large //
-#define INTERVAL 100            // interval between the readings (in milliseconds) //
-#define CALIBRATION_TIMES 3     // number of readings to calibrate
+#define INTERVAL 60000          // interval between the readings (in milliseconds)
+#define CALIBRATION_TIMES 30    // number of readings to calibrate
 
 //--------------- Pins ---------------//
 int tempPin = A3;                         // lm35 pin
 int pinSCT = A5;                          // Analog pint connected to SCT-013 sensor
+int resetPin = 12;                        // pin to reset the board
 
 //--------------- Auxiliar ---------------//
 float reading = 0;                        // temperature reading variable
@@ -64,6 +65,7 @@ void setup() {
   Serial.begin(9600);
   analogReference(INTERNAL1V1);
   pinMode(tempPin, INPUT);
+  digitalWrite(resetPin, HIGH);
   Serial.begin(9600);
 
   //--------------- Ethernet Inicialization ---------------//
@@ -72,10 +74,10 @@ void setup() {
   //--------------- NTP Inicialization ---------------//
   Udp.begin(localPort);
   Serial.println("Waiting for sync in NTP server...");
-  //while (year() < 2018) {
-  setSyncProvider(getNtpTime);
-  getActualDate();
-  //}
+  while (year() < 2018) {
+    setSyncProvider(getNtpTime);
+    getActualDate();
+  }
 
   //--------------- Energy Monitor Inicialization ---------------//
   //SCT013.current(pinSCT, 1.70101);
@@ -168,7 +170,8 @@ void checkChangeDay() {
     sprintf(checkNewDay, "%d", day());
   }
   if (checkNewDay != actualDay) {
-    getActualDate();
+    digitalWrite(resetPin, LOW);
+    //getActualDate();
   }
 }
 
@@ -239,5 +242,4 @@ void sendNTPpacket(IPAddress & address) {
   Udp.write(packetBuffer, NTP_PACKET_SIZE);
   Udp.endPacket();
 }
-
 
