@@ -52,7 +52,7 @@ byte packetBuffer[NTP_PACKET_SIZE];     // buffer to hold incoming & outgoing pa
 unsigned int localPort = 8888;          // local port to listen for UDP packets
 IPAddress timeServer(200, 160, 7, 186); // ntp.br server ip address
 const int timeZone = -3;                // UTC -3  BRT Brasília Time
-const int interval_ntp = 86400;         // Number of seconds between re-syncs (86400s = 24hs)
+const long interval_ntp = 86400;        // Number of seconds between re-syncs (86400s = 24hs)
 
 //--------------- SCT-013 Sensor Variables ---------------//
 EnergyMonitor SCT013;
