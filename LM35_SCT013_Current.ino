@@ -13,10 +13,12 @@
 
 #include <SPI.h>
 #include <Ethernet.h>
-#include <Time.h>
 #include <TimeLib.h>
-#include <HttpClient.h>
 #include <EmonLib.h>
+#include <EthernetReset.h>
+#include <Siren.h>
+#include <NTP.h>
+#include <avr/wdt.h>
 
 #define TAM_S 11                // tam small //
 #define TAM_L 85                // tam large //
@@ -24,20 +26,23 @@
 #define CALIBRATION_TIMES 30    // number of readings to calibrate
 
 //--------------- Pins ---------------//
-int tempPin = A3;                         // lm35 pin
-int pinSCT = A5;                          // Analog pint connected to SCT-013 sensor
-int resetPin = 12;                        // pin to reset the board
+PROGMEM const int tempPin = A3;                   // lm35 pin
+PROGMEM const int pinSCT = A5;                    // Analog pin connected to SCT-013 sensor
+PROGMEM const int relePin = 9;                    // relay module pin
 
-//--------------- Auxiliar ---------------//
-float reading = 0;                        // temperature reading variable
+//--------------- Auxiliar Variables ---------------//
+PROGMEM const boolean serial = true;      // variable to enable/disable the serial output
+float reading;                            // temperature reading variable
 const float voltage_reference = 1.1;      // used to change the reference's voltage, could be changed depending of the board used
+PROGMEM const uint8_t equipment = 2;      // equipment's number (1 = Laboratory; 2 - DataCenter; 3 - Meat Laboratory)
 
 //--------------- Ethernet ---------------//
-byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xFD};
-IPAddress ip(10, 156, 10, 13);
-EthernetServer server(80);
-EthernetClient client;
-IPAddress ip_webservice(200, 19, 231, 235);
+byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xFD};    // mac address from arduino
+byte ip[] = { 10, 156, 10, 13 };                      // ip address from arduino
+EthernetClient client;                                // used to access insertion on webservice
+EthernetClient client_status;                         // used to access the status information to turns on the siren
+EthernetReset reset(8080);                            // object to a remote reset/reprogram on arduino
+byte ip_webservice[] = { 200, 19, 231, 235 };         // ip address from the webservice
 
 //--------------- Database Variables ---------------//
 char actualHour[TAM_S] = "", actualMinute[TAM_S] = "", actualSecond[TAM_S] = "";
@@ -45,93 +50,134 @@ char actualMonth[TAM_S] = "", actualDay[TAM_S] = "";
 char sentence_temperature[100];
 char sentence_current[100];
 
-//--------------- NTP Server ---------------//
-EthernetUDP Udp;
-const int NTP_PACKET_SIZE = 48;         // NTP time is in the first 48 bytes of message
-byte packetBuffer[NTP_PACKET_SIZE];     // buffer to hold incoming & outgoing packets
-unsigned int localPort = 8888;          // local port to listen for UDP packets
-IPAddress timeServer(200, 160, 7, 186); // ntp.br server ip address
-const int timeZone = -3;                // UTC -3  BRT Brasília Time
-const long interval_ntp = 86400;        // Number of seconds between re-syncs (86400s = 24hs)
-
 //--------------- SCT-013 Sensor Variables ---------------//
 EnergyMonitor SCT013;
 
 //--------------- Sensor Index Variables ---------------//
-const int index_SCT = 9;
-const int sensor_index = 10;
+PROGMEM const int index_SCT = 9;
+PROGMEM const int sensor_index = 10;
 
 void setup() {
-  Serial.begin(9600);
-  analogReference(INTERNAL1V1);
+  if (serial) {
+    Serial.begin(9600);
+  }
+  analogReference(INTERNAL1V1);         // needed use a 1.1v voltage_reference to work properly on Arduino Mega
   pinMode(tempPin, INPUT);
-  digitalWrite(resetPin, HIGH);
-  Serial.begin(9600);
 
   //--------------- Ethernet Inicialization ---------------//
   Ethernet.begin(mac, ip);
 
-  //--------------- NTP Inicialization ---------------//
-  Udp.begin(localPort);
-  Serial.println("Waiting for sync in NTP server...");
-  while (year() < 2018) {
-    setSyncProvider(getNtpTime);
-    getActualDate();
-  }
+  //--------------- NTP/Date Inicialization ---------------//
+  syncTimeNTP();
+  getActualDate();
 
   //--------------- Energy Monitor Inicialization ---------------//
   //SCT013.current(pinSCT, 1.70101);
   SCT013.current(pinSCT, 6.06060606061);
 
+  //--------------- Watchdog Inicialization ---------------//
+  wdt_enable(WDTO_8S);
+
   //--------------- Calibration ---------------//
+  Serial.print(F("Calibrating..."));
   for (int i = 0; i < CALIBRATION_TIMES; i++) {
     reading = (voltage_reference * analogRead(tempPin) * 100.0) / 1024;     // Calibrate the temperature's reading
-    double irms = SCT013.calcIrms(1480);                                    // Calibrate the eletric current's reading
+    SCT013.calcIrms(1480);                                                  // Calibrate the eletric current's reading
+    checkStatus();                                                          // Calibrate the initial status
+    wdt_reset();
   }
+  Serial.println(F(" complete"));
 }
 
 void loop() {
-  char temperature[TAM_S];
-  char current[TAM_S];
+  char temperature[TAM_S];      // sentence from the temperature insertion on website
+  char current[TAM_S];          // sentence from the electric current insertion on website
+  double irms;                  // stores the eletric current's value
+  char actualDate[TAM_S];       // stores the formatted date
+  char actualTime[TAM_S];       // stores the formatted time
 
   reading = (voltage_reference * analogRead(tempPin) * 100.0) / 1024;     // Calculate the current temperature
-  Serial.print("Temperature: ");
+  Serial.print(F("Temperature: "));
   Serial.println((float)reading);
 
-  double irms = SCT013.calcIrms(1480);      // Calculate the eletric current's value
-  Serial.print("Corrente = ");
+  irms = SCT013.calcIrms(1480);
+  Serial.print(F("Corrente = "));
   Serial.print(irms);
-  Serial.println(" A");
+  Serial.println(F(" A"));
   Serial.println();
 
   // get actual time (hour, minute, second) and check if has any change in day, format to save on database //
   checkChangeDay();
   getActualTime();
-  char actualDate[TAM_S];
   sprintf(actualDate, "%d-%s-%s", year(), actualMonth, actualDay);
-  char actualTime[TAM_S];
   sprintf(actualTime, "%s:%s:%s", actualHour, actualMinute, actualSecond);
 
-  // formatting char array to send a http request. URL format: http://tecnologias.cppse.embrapa.br/arduino/leitura.php?sensor='1'&data='2018-08-26'&hora='10:23:51'&valor=18.36 //
+  // formatting char array to send a http request. URL format: http://tecnologias.cppse.embrapa.br/arduino/leitura_teste.php?sensor='1'&data='2018-08-26'&hora='10:23:51'&valor=18.36 //
   dtostrf(reading, 4, 2, temperature);      // float to char array
-  sprintf(sentence_temperature, "GET /arduino/leitura.php?sensor=%d&data='%s'&hora='%s'&valor=%s HTTP/1.1", sensor_index, actualDate, actualTime, temperature);
+  sprintf(sentence_temperature, "GET /arduino/leitura_teste.php?sensor=%d&data='%s'&hora='%s'&valor=%s HTTP/1.1", sensor_index, actualDate, actualTime, temperature);
   dtostrf(irms, 4, 2, current);             // float to char array
-  sprintf(sentence_current, "GET /arduino/leitura.php?sensor=%d&data='%s'&hora='%s'&valor=%s HTTP/1.1", index_SCT, actualDate, actualTime, current);
+  sprintf(sentence_current, "GET /arduino/leitura_teste.php?sensor=%d&data='%s'&hora='%s'&valor=%s HTTP/1.1", index_SCT, actualDate, actualTime, current);
 
   // save on database with web service //
   sendHttpRequest(sentence_temperature);
   sendHttpRequest(sentence_current);
 
-  delay(INTERVAL);                          // wait for x milliseconds before taking the reading again
+  // check status on webservice //
+  Serial.print(F(">> Status: "));
+  switch (checkStatus()) {
+    case CONSTANT: {
+        sirenControl(relePin, CONSTANT);
+        Serial.println(F("Out of range."));
+        break;
+      }
+    case NONE: {
+        sirenControl(relePin, NONE);
+        Serial.println(F("Normal."));
+        break;
+      }
+    case SPACED: {
+        sirenControl(relePin, SPACED);
+        Serial.println(F("DB Error."));
+        break;
+      }
+    default: {
+        sirenControl(relePin, NETWORK_ERROR);
+        Serial.println(F("Network Error."));
+        break;
+      }
+  }
+  Serial.println();
+
+  wdt_reset();
+
+  // check reset client //
+    for (uint8_t i = 0; i <= INTERVAL / 1000; i++) {      // maybe change INTERVAL value 60000ms to 60s
+      // Check if the reset command was send
+      reset.check();
+      wdt_reset();
+      delay(1000);
+    }
+  //delay(INTERVAL);                          // wait for x milliseconds before taking the reading again
 }
 
 // function to connect on web service address //
 void connectWebService() {
-  //Serial.print("Connecting with web service... ");
-  if (client.connect(ip_webservice, 80)) {
-    //Serial.println("connected.");
-  } else {
-    //Serial.println("connection failed");
+  // client.connect(ip_webservice, 80);
+  //client_status.connect(ip_webservice, 80);
+  //Serial.print(F("Connecting with web service... "));
+  if (!client.connected()) {
+    if (client.connect(ip_webservice, 80)) {
+      //Serial.println(F("Client connected."));
+    } else {
+      //Serial.println(F("Client connection failed."));
+    }
+  }
+  if (!client_status.connected()) {
+    if (client_status.connect(ip_webservice, 80)) {
+      //Serial.println(F("Status client connected."));
+    } else {
+      //Serial.println(F("Status client connection failed."));
+    }
   }
 }
 
@@ -145,6 +191,67 @@ void sendHttpRequest(char sentence[]) {
     client.println("Connection: close");
     client.println();
   }
+  client.stop();
+}
+
+// function to check the status and return a code for them (0: normal state; 1: attention state (out of range); -1: database error) //
+int checkStatus() {
+  char alert[TAM_L];
+  char val[3];
+  char body[15] = "";
+  uint8_t i = 0;
+  int value = 2;
+  char c, d;
+  connectWebService();
+  if (client_status.connected()) {
+    // formatting char array to send a http request. URL format: http://tecnologias.cppse.embrapa.br/arduino/alerta.php?equipamento=2 //
+    sprintf(alert, "GET /arduino/alerta.php?equipamento=%d HTTP/1.1", equipment);
+    // Make a HTTP request //
+    client_status.println(alert);
+    client_status.println("Host: tecnologias.cppse.embrapa.br");
+    client_status.println("Connection: keep-alive");
+    client_status.println();
+    while (client_status.available()) {
+      //c = client_status.read();
+      //Serial.print(c);
+
+      if ((d = client_status.read()) == '<' && (c = client_status.read()) == 'b') {
+        body[i++] = d;
+        body[i++] = c;
+        while ((c = client_status.read()) != '>') {
+          body[i++] = c;
+        }
+        body[i++] = c;
+        body[i] = '\0';
+        i = 0;
+      } else {
+        if (body[0] == '<' && body[1] == 'b' && body[2] == 'o' && body[3] == 'd' && body[4] == 'y' && body[5] == '>') {
+          if ((c = client_status.read()) == '-') {
+            val[0] = c;
+            if (isDigit(c = client_status.read())) {
+              val[1] = c;
+              val[2] = '\0';
+            } else {
+              break;
+            }
+          } else {
+            if (isDigit(c)) {
+              val[0] = c;
+            } else {
+              val[0] = '2';
+            }
+            val[1] = '\0';
+          }
+          value = atoi(val);
+          break;
+        }
+      }
+
+    }
+  }
+  /*Serial.print(F("Value: "));
+  Serial.println(value);*/
+  return value;
 }
 
 // function to get a formatted date to char array //
@@ -170,8 +277,7 @@ void checkChangeDay() {
     sprintf(checkNewDay, "%d", day());
   }
   if (checkNewDay != actualDay) {
-    digitalWrite(resetPin, LOW);
-    //getActualDate();
+    getActualDate();
   }
 }
 
@@ -193,53 +299,3 @@ void getActualTime() {
     sprintf(actualSecond, "%d", second());
   }
 }
-
-// function to initialize NTP synchronization //
-time_t getNtpTime() {
-  while (Udp.parsePacket() > 0) ;               // discard any previously received packets
-  Serial.println("Transmit NTP Request");
-  sendNTPpacket(timeServer);
-  uint32_t beginWait = millis();
-  while (millis() - beginWait < 1500) {
-    int size = Udp.parsePacket();
-    if (size >= NTP_PACKET_SIZE) {
-      Serial.println("Receive NTP Response OK");
-      Serial.println();
-      setSyncInterval(interval_ntp);
-      Udp.read(packetBuffer, NTP_PACKET_SIZE);  // read packet into the buffer
-      unsigned long secsSince1900;
-      // convert four bytes starting at location 40 to a long integer
-      secsSince1900 =  (unsigned long)packetBuffer[40] << 24;
-      secsSince1900 |= (unsigned long)packetBuffer[41] << 16;
-      secsSince1900 |= (unsigned long)packetBuffer[42] << 8;
-      secsSince1900 |= (unsigned long)packetBuffer[43];
-      return secsSince1900 - 2208988800UL + timeZone * SECS_PER_HOUR;
-    }
-  }
-  Serial.println("No NTP Response :(");
-  Serial.println();
-  return 0;                                    // return 0 if unable to get the time
-}
-
-// send an NTP request to the time server at the given address //
-void sendNTPpacket(IPAddress & address) {
-  // set all bytes in the buffer to 0
-  memset(packetBuffer, 0, NTP_PACKET_SIZE);
-  // Initialize values needed to form NTP request
-  // (see URL above for details on the packets)
-  packetBuffer[0] = 0b11100011;   // LI, Version, Mode
-  packetBuffer[1] = 0;     // Stratum, or type of clock
-  packetBuffer[2] = 6;     // Polling Interval
-  packetBuffer[3] = 0xEC;  // Peer Clock Precision
-  // 8 bytes of zero for Root Delay & Root Dispersion
-  packetBuffer[12]  = 49;
-  packetBuffer[13]  = 0x4E;
-  packetBuffer[14]  = 49;
-  packetBuffer[15]  = 52;
-  // all NTP fields have been given values, now
-  // you can send a packet requesting a timestamp:
-  Udp.beginPacket(address, 123); //NTP requests are to port 123
-  Udp.write(packetBuffer, NTP_PACKET_SIZE);
-  Udp.endPacket();
-}
-
